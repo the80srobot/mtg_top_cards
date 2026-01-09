@@ -125,7 +125,7 @@ fn fetch_data_repo(data_dir: &str, repo_url: &str) -> Result<(), String> {
             return Err("git pull failed".to_string());
         }
     } else {
-        // Clone with sparse checkout
+        // Shallow clone (only recent history)
         eprintln!("Cloning data repository to {}...", data_dir);
 
         // Create parent directory if needed
@@ -134,32 +134,13 @@ fn fetch_data_repo(data_dir: &str, repo_url: &str) -> Result<(), String> {
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
-        // Sparse clone
         let status = Command::new("git")
-            .args([
-                "clone",
-                "--filter=blob:none",
-                "--sparse",
-                repo_url,
-                data_dir,
-            ])
+            .args(["clone", "--depth=1", repo_url, data_dir])
             .status()
             .map_err(|e| format!("Failed to run git clone: {}", e))?;
 
         if !status.success() {
             return Err("git clone failed".to_string());
-        }
-
-        // Configure sparse checkout to fetch only year directories with JSON files
-        eprintln!("Configuring sparse checkout...");
-        let status = Command::new("git")
-            .args(["sparse-checkout", "set", "20*"])
-            .current_dir(data_dir)
-            .status()
-            .map_err(|e| format!("Failed to configure sparse checkout: {}", e))?;
-
-        if !status.success() {
-            return Err("sparse-checkout configuration failed".to_string());
         }
     }
 
