@@ -146,13 +146,14 @@ fn fetch_data_repo(data_dir: &str, repo_url: &str) -> Result<(), String> {
     if data_path.join(".git").exists() {
         // Repository exists, update it
         eprintln!("Updating data repository in {}...", data_dir);
-        let status = Command::new("git")
+        let output = Command::new("git")
             .args(["pull", "--ff-only"])
             .current_dir(data_dir)
+            .stdout(std::process::Stdio::null())
             .status()
             .map_err(|e| format!("Failed to run git pull: {}", e))?;
 
-        if !status.success() {
+        if !output.success() {
             return Err("git pull failed".to_string());
         }
     } else {
