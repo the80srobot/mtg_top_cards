@@ -1,17 +1,19 @@
 use clap::Parser;
 use rayon::prelude::*;
 use regex::Regex;
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const DEFAULT_DATA_REPO: &str = "https://github.com/barrins-project/mtg_decklist_cache.git";
+const SCRYFALL_BULK_API: &str = "https://api.scryfall.com/bulk-data";
+const SCRYFALL_CACHE_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 
 #[derive(Parser)]
 #[command(name = "top_cards")]
@@ -56,6 +58,35 @@ struct Args {
     /// Git URL for the data repository
     #[arg(long, default_value = DEFAULT_DATA_REPO)]
     data_repo: String,
+
+    /// Resolve back faces of double-faced cards via Scryfall
+    #[arg(long, default_value = "true")]
+    resolve_faces: bool,
+}
+
+// Scryfall API types
+#[derive(Deserialize)]
+struct ScryfallBulkDataEntry {
+    #[serde(rename = "type")]
+    data_type: String,
+    download_uri: String,
+}
+
+#[derive(Deserialize)]
+struct ScryfallBulkDataResponse {
+    data: Vec<ScryfallBulkDataEntry>,
+}
+
+#[derive(Deserialize)]
+struct ScryfallCardFace {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ScryfallCard {
+    name: Option<String>,
+    layout: Option<String>,
+    card_faces: Option<Vec<ScryfallCardFace>>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +177,120 @@ fn fetch_data_repo(data_dir: &str, repo_url: &str) -> Result<(), String> {
 
     eprintln!("Data repository ready.");
     Ok(())
+}
+
+/// Get path to Scryfall bulk data cache file
+fn scryfall_cache_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".scryfall")
+        .join("oracle-cards.json")
+}
+
+/// Check if cache file exists and is fresh enough
+fn is_cache_fresh(path: &Path) -> bool {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(age) = SystemTime::now().duration_since(modified) {
+                return age.as_secs() < SCRYFALL_CACHE_MAX_AGE_SECS;
+            }
+        }
+    }
+    false
+}
+
+/// Fetch Scryfall bulk data and cache it locally
+fn fetch_scryfall_bulk_data(cache_path: &Path) -> Result<(), String> {
+    eprintln!("Fetching Scryfall bulk data index...");
+
+    // Get the download URL for oracle_cards
+    let bulk_response: ScryfallBulkDataResponse = ureq::get(SCRYFALL_BULK_API)
+        .call()
+        .map_err(|e| format!("Failed to fetch bulk data index: {}", e))?
+        .into_json()
+        .map_err(|e| format!("Failed to parse bulk data index: {}", e))?;
+
+    let oracle_entry = bulk_response
+        .data
+        .iter()
+        .find(|e| e.data_type == "oracle_cards")
+        .ok_or("No oracle_cards entry in bulk data")?;
+
+    eprintln!("Downloading oracle cards (~150MB)...");
+
+    // Download the bulk data
+    let response = ureq::get(&oracle_entry.download_uri)
+        .call()
+        .map_err(|e| format!("Failed to download bulk data: {}", e))?;
+
+    // Create cache directory
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+
+    // Write to cache file
+    let mut file = File::create(cache_path)
+        .map_err(|e| format!("Failed to create cache file: {}", e))?;
+    std::io::copy(&mut response.into_reader(), &mut file)
+        .map_err(|e| format!("Failed to write cache file: {}", e))?;
+
+    eprintln!("Scryfall data cached at {}", cache_path.display());
+    Ok(())
+}
+
+/// Build a map of front face name -> back face name from Scryfall bulk data.
+fn load_back_faces_from_cache(cache_path: &Path) -> HashMap<String, String> {
+    let mut back_faces = HashMap::new();
+    let layouts_with_back_faces: HashSet<&str> =
+        ["transform", "modal_dfc", "reversible_card"].into_iter().collect();
+
+    let file = match File::open(cache_path) {
+        Ok(f) => f,
+        Err(_) => return back_faces,
+    };
+    let reader = BufReader::new(file);
+
+    // Parse as array of cards
+    let cards: Vec<ScryfallCard> = match serde_json::from_reader(reader) {
+        Ok(c) => c,
+        Err(_) => return back_faces,
+    };
+
+    for card in cards {
+        let layout = match &card.layout {
+            Some(l) => l.as_str(),
+            None => continue,
+        };
+
+        if layouts_with_back_faces.contains(layout) {
+            if let Some(faces) = card.card_faces {
+                if faces.len() >= 2 {
+                    back_faces.insert(faces[0].name.clone(), faces[1].name.clone());
+                }
+            }
+        }
+    }
+
+    back_faces
+}
+
+/// Get back faces map, fetching bulk data if needed.
+fn resolve_back_faces() -> HashMap<String, String> {
+    let cache_path = scryfall_cache_path();
+
+    if !is_cache_fresh(&cache_path) {
+        if let Err(e) = fetch_scryfall_bulk_data(&cache_path) {
+            eprintln!("Warning: Failed to fetch Scryfall data: {}", e);
+            // Try to use stale cache if it exists
+            if !cache_path.exists() {
+                return HashMap::new();
+            }
+            eprintln!("Using stale cache...");
+        }
+    }
+
+    load_back_faces_from_cache(&cache_path)
 }
 
 fn process_file(
@@ -290,6 +435,28 @@ fn main() {
     let mut sorted: Vec<_> = card_counts.into_iter().collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
+    // Take top N cards
+    let top_cards: Vec<_> = sorted.into_iter().take(args.num).collect();
+
+    // Resolve back faces if requested
+    let back_faces = if args.resolve_faces {
+        eprintln!("Loading double-faced card data...");
+        let faces = resolve_back_faces();
+        eprintln!("Loaded {} double-faced cards", faces.len());
+        faces
+    } else {
+        HashMap::new()
+    };
+
+    // Build final output: each card, plus back face if it has one
+    let mut final_cards: Vec<(String, f64)> = Vec::new();
+    for (name, count) in top_cards {
+        final_cards.push((name.clone(), count));
+        if let Some(back_face) = back_faces.get(&name) {
+            final_cards.push((back_face.clone(), count));
+        }
+    }
+
     // Output results
     let output: Box<dyn Write> = match &args.output {
         Some(path) => {
@@ -300,7 +467,7 @@ fn main() {
     };
     let mut writer = std::io::BufWriter::new(output);
 
-    for (card, count) in sorted.into_iter().take(args.num) {
+    for (card, count) in final_cards {
         writeln!(writer, "{:.2} {}", count, card).unwrap();
     }
 
