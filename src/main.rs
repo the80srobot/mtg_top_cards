@@ -146,11 +146,26 @@ struct Card {
     name: String,
 }
 
+/// Deserialize a value that can be either a string or an integer into Option<String>
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(other) => Err(D::Error::custom(format!("expected string or number, got {:?}", other))),
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 struct Deck {
     #[serde(default)]
     player: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     result: Option<String>,
     #[serde(default)]
     url: Option<String>,
