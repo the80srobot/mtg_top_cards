@@ -167,7 +167,7 @@ struct Deck {
     player: Option<String>,
     #[serde(default, deserialize_with = "deserialize_string_or_int")]
     result: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "anchor_uri")]
     url: Option<String>,
     mainboard: Option<Vec<Card>>,
     sideboard: Option<Vec<Card>>,
