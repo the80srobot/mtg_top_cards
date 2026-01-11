@@ -152,6 +152,8 @@ struct Deck {
     player: Option<String>,
     #[serde(default)]
     result: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
     mainboard: Option<Vec<Card>>,
     sideboard: Option<Vec<Card>>,
 }
@@ -169,6 +171,7 @@ struct DeckMatch {
     file_date: String,
     player: Option<String>,
     result: Option<String>,
+    url: Option<String>,
     mainboard: Vec<Card>,
     sideboard: Vec<Card>,
     matched_cards: Vec<CardMatchInfo>,
@@ -534,6 +537,7 @@ fn search_file_for_decks(
                     file_date: file_date.clone(),
                     player: deck.player.clone(),
                     result: deck.result.clone(),
+                    url: deck.url.clone(),
                     mainboard: deck.mainboard.clone().unwrap_or_default(),
                     sideboard: deck.sideboard.clone().unwrap_or_default(),
                     matched_cards,
@@ -801,6 +805,9 @@ fn run_search_decks(args: &Args, search_args: &SearchDecksArgs) {
         if let Some(result) = &deck_match.result {
             println!("Result: {}", result);
         }
+        if let Some(url) = &deck_match.url {
+            println!("URL: {}", url);
+        }
 
         println!("\nMatched cards:");
         for m in &deck_match.matched_cards {
@@ -915,6 +922,7 @@ mod tests {
         Deck {
             player: Some("TestPlayer".to_string()),
             result: Some("1st".to_string()),
+            url: Some("https://example.com/deck/123".to_string()),
             mainboard: Some(
                 mainboard
                     .into_iter()
