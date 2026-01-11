@@ -857,3 +857,402 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    // ==================== Unit Tests for parse_card_criterion ====================
+
+    #[test]
+    fn test_parse_card_criterion_with_count() {
+        let criterion = parse_card_criterion("4 Lightning Bolt");
+        assert_eq!(criterion.name, "Lightning Bolt");
+        assert_eq!(criterion.count, Some(4));
+    }
+
+    #[test]
+    fn test_parse_card_criterion_without_count() {
+        let criterion = parse_card_criterion("Lightning Bolt");
+        assert_eq!(criterion.name, "Lightning Bolt");
+        assert_eq!(criterion.count, None);
+    }
+
+    #[test]
+    fn test_parse_card_criterion_with_extra_whitespace() {
+        let criterion = parse_card_criterion("  4   Ragavan, Nimble Pilferer  ");
+        assert_eq!(criterion.name, "Ragavan, Nimble Pilferer");
+        assert_eq!(criterion.count, Some(4));
+    }
+
+    #[test]
+    fn test_parse_card_criterion_single_copy() {
+        let criterion = parse_card_criterion("1 Emrakul, the Aeons Torn");
+        assert_eq!(criterion.name, "Emrakul, the Aeons Torn");
+        assert_eq!(criterion.count, Some(1));
+    }
+
+    #[test]
+    fn test_parse_card_criterion_card_starting_with_number() {
+        // Card name that might look like it starts with a number
+        let criterion = parse_card_criterion("97th Regiment");
+        assert_eq!(criterion.name, "th Regiment");
+        assert_eq!(criterion.count, Some(97));
+    }
+
+    #[test]
+    fn test_parse_card_criterion_empty_string() {
+        let criterion = parse_card_criterion("");
+        assert_eq!(criterion.name, "");
+        assert_eq!(criterion.count, None);
+    }
+
+    // ==================== Unit Tests for deck_matches_criteria ====================
+
+    fn create_test_deck(mainboard: Vec<(&str, u32)>, sideboard: Vec<(&str, u32)>) -> Deck {
+        Deck {
+            player: Some("TestPlayer".to_string()),
+            result: Some("1st".to_string()),
+            mainboard: Some(
+                mainboard
+                    .into_iter()
+                    .map(|(name, count)| Card {
+                        name: name.to_string(),
+                        count,
+                    })
+                    .collect(),
+            ),
+            sideboard: Some(
+                sideboard
+                    .into_iter()
+                    .map(|(name, count)| Card {
+                        name: name.to_string(),
+                        count,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn test_deck_matches_single_card_present() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4), ("Mountain", 20)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: None,
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_some());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].found_main, 4);
+    }
+
+    #[test]
+    fn test_deck_matches_single_card_missing() {
+        let deck = create_test_deck(
+            vec![("Mountain", 20)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: None,
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deck_matches_with_count_satisfied() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: Some(4),
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_deck_matches_with_count_not_satisfied() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 2)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: Some(4),
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deck_matches_exact_count_satisfied() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 2)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: Some(2),
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, true, false);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_deck_matches_exact_count_not_satisfied() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: Some(2),
+        }];
+
+        // exact=true, so 4 != 2
+        let result = deck_matches_criteria(&deck, &criteria, true, false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deck_matches_sideboard_included() {
+        let deck = create_test_deck(
+            vec![("Mountain", 20)],
+            vec![("Blood Moon", 2)],
+        );
+        let criteria = vec![CardCriterion {
+            name: "Blood Moon".to_string(),
+            count: None,
+        }];
+
+        // Without sideboard
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_none());
+
+        // With sideboard
+        let result = deck_matches_criteria(&deck, &criteria, false, true);
+        assert!(result.is_some());
+        let matches = result.unwrap();
+        assert_eq!(matches[0].found_side, 2);
+    }
+
+    #[test]
+    fn test_deck_matches_multiple_criteria_all_match() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4), ("Ragavan, Nimble Pilferer", 4)],
+            vec![],
+        );
+        let criteria = vec![
+            CardCriterion {
+                name: "Lightning Bolt".to_string(),
+                count: Some(4),
+            },
+            CardCriterion {
+                name: "Ragavan, Nimble Pilferer".to_string(),
+                count: Some(4),
+            },
+        ];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_some());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_deck_matches_multiple_criteria_one_missing() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4)],
+            vec![],
+        );
+        let criteria = vec![
+            CardCriterion {
+                name: "Lightning Bolt".to_string(),
+                count: Some(4),
+            },
+            CardCriterion {
+                name: "Ragavan, Nimble Pilferer".to_string(),
+                count: Some(4),
+            },
+        ];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_deck_matches_case_insensitive() {
+        let deck = create_test_deck(
+            vec![("Lightning Bolt", 4)],
+            vec![],
+        );
+        let criteria = vec![CardCriterion {
+            name: "LIGHTNING BOLT".to_string(),
+            count: None,
+        }];
+
+        let result = deck_matches_criteria(&deck, &criteria, false, false);
+        assert!(result.is_some());
+    }
+
+    // ==================== Integration Tests ====================
+
+    fn create_test_tournament_file(dir: &Path, date_path: &str, content: &str) {
+        let full_path = dir.join(date_path);
+        std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
+        let mut file = File::create(&full_path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+    }
+
+    fn sample_tournament_json() -> &'static str {
+        r#"{
+            "tournament": {
+                "name": "Test Tournament",
+                "format": "Modern",
+                "date": "2025-01-10"
+            },
+            "decks": [
+                {
+                    "player": "Alice",
+                    "result": "1st",
+                    "mainboard": [
+                        {"count": 4, "name": "Lightning Bolt"},
+                        {"count": 4, "name": "Ragavan, Nimble Pilferer"},
+                        {"count": 20, "name": "Mountain"}
+                    ],
+                    "sideboard": [
+                        {"count": 2, "name": "Blood Moon"}
+                    ]
+                },
+                {
+                    "player": "Bob",
+                    "result": "2nd",
+                    "mainboard": [
+                        {"count": 2, "name": "Lightning Bolt"},
+                        {"count": 4, "name": "Thoughtseize"},
+                        {"count": 20, "name": "Swamp"}
+                    ],
+                    "sideboard": []
+                }
+            ]
+        }"#
+    }
+
+    #[test]
+    fn test_search_file_for_decks_finds_matching_deck() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_tournament_file(
+            temp_dir.path(),
+            "2025/01/10/tournament.json",
+            sample_tournament_json(),
+        );
+
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: Some(4),
+        }];
+
+        let matches = search_file_for_decks(
+            &temp_dir.path().join("2025/01/10/tournament.json"),
+            &["Modern".to_string()],
+            today_days(),
+            1825,
+            &criteria,
+            false,
+            false,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].player, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_search_file_for_decks_respects_format_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_tournament_file(
+            temp_dir.path(),
+            "2025/01/10/tournament.json",
+            sample_tournament_json(),
+        );
+
+        let criteria = vec![CardCriterion {
+            name: "Lightning Bolt".to_string(),
+            count: None,
+        }];
+
+        // Search with wrong format
+        let matches = search_file_for_decks(
+            &temp_dir.path().join("2025/01/10/tournament.json"),
+            &["Standard".to_string()],
+            today_days(),
+            1825,
+            &criteria,
+            false,
+            false,
+        );
+
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_process_file_aggregates_card_counts() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_tournament_file(
+            temp_dir.path(),
+            "2025/01/10/tournament.json",
+            sample_tournament_json(),
+        );
+
+        let counts = process_file(
+            &temp_dir.path().join("2025/01/10/tournament.json"),
+            &["Modern".to_string()],
+            today_days(),
+            45.0,
+            1825,
+            false, // no weight for easier testing
+        );
+
+        // Lightning Bolt: 4 (Alice) + 2 (Bob) = 6
+        assert_eq!(counts.get("Lightning Bolt"), Some(&6.0));
+        // Mountain: 20 (Alice only)
+        assert_eq!(counts.get("Mountain"), Some(&20.0));
+        // Swamp: 20 (Bob only)
+        assert_eq!(counts.get("Swamp"), Some(&20.0));
+    }
+
+    #[test]
+    fn test_extract_date_from_path() {
+        let date = extract_date_from_path("/data/2025/01/15/tournament.json");
+        assert_eq!(date, Some((2025, 1, 15)));
+
+        let no_date = extract_date_from_path("/data/tournament.json");
+        assert_eq!(no_date, None);
+    }
+
+    #[test]
+    fn test_days_since_epoch_ordering() {
+        let day1 = days_since_epoch(2025, 1, 1);
+        let day2 = days_since_epoch(2025, 1, 2);
+        let day_later = days_since_epoch(2025, 6, 15);
+
+        assert!(day2 > day1);
+        assert!(day_later > day2);
+    }
+}
+
